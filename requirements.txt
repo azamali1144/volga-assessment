@@ -1,0 +1,18 @@
+# --- Web framework ---
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+python-multipart==0.0.9
+
+# --- Transcription engine ---
+# openai-whisper pulls in torch; only needed when TRANSCRIPTION_ENGINE=whisper
+# (the default). Set TRANSCRIPTION_ENGINE=mock to run/test the service
+# without installing this at all - see README "Running without downloading
+# a model".
+openai-whisper==20231117
+
+# --- Data / validation ---
+pydantic==2.7.4
+
+# --- Testing ---
+pytest==8.2.2
+httpx==0.27.0
