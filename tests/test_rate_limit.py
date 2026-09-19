@@ -1,6 +1,6 @@
 import unittest
 
-from app.rate_limit import RateLimiter
+from app.core.rate_limit import RateLimiter
 
 
 class TestRateLimiter(unittest.TestCase):

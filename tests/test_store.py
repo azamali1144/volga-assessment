@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.store import JobStore
+from app.db.store import JobStore
 
 
 class TestJobStore(unittest.TestCase):

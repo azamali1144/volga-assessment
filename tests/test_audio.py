@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.audio import normalize_to_wav, probe_duration_seconds, split_into_chunks
+from app.services.audio import normalize_to_wav, probe_duration_seconds, split_into_chunks
 from tests.conftest_helpers import make_tone
 
 

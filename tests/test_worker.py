@@ -5,11 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.queue_backend import InMemoryQueue
-from app.storage_backend import LocalDiskStorage
-from app.store import JobStore
-from app.transcription_engine import Segment, TranscriptionResult
-from app.worker import TranscriptionPipeline, Worker
+from app.db.store import JobStore
+from app.services.queue_backend import InMemoryQueue
+from app.services.storage_backend import LocalDiskStorage
+from app.services.transcription_engine import Segment, TranscriptionResult
+from app.services.worker import TranscriptionPipeline, Worker
 from tests.conftest_helpers import make_tone
 
 

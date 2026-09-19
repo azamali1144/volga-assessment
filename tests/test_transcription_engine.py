@@ -3,8 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from app.audio import split_into_chunks
-from app.transcription_engine import MockEngine, merge_chunk_results
+from app.services.audio import split_into_chunks
+from app.services.transcription_engine import MockEngine, merge_chunk_results
 from tests.conftest_helpers import make_tone
 
 
