@@ -6,9 +6,9 @@ speaking outline, not a script to read verbatim — say it in your own words,
 but hit every bullet. Target length: 6–9 minutes. Have the repo open in your
 editor and `README.md` open in a second tab before you hit record.
 
-Suggested screen order: README.md architecture diagram → app/main.py →
-app/worker.py → app/audio.py → app/transcription_engine.py → app/store.py →
-tests running in the terminal.
+Suggested screen order: README.md architecture diagram → app/api/routes.py →
+app/services/worker.py → app/services/audio.py → app/services/transcription_engine.py →
+app/db/store.py → tests running in the terminal.
 
 ---
 
@@ -40,9 +40,9 @@ queue — an in-memory asyncio.Queue here, SQS or RabbitMQ in production; and
 the metadata database — SQLite here, Postgres in production. I'll show why
 that matters when we look at the code."
 
-## 3. Walk through the upload endpoint — app/main.py (1.5–2 min)
+## 3. Walk through the upload endpoint — app/api/routes.py (1.5–2 min)
 
-Open `app/main.py`, scroll to `create_transcription`.
+Open `app/api/routes.py`, scroll to `create_transcription`.
 
 "This is the upload endpoint. It validates the extension against an
 allow-list, then streams the file to disk with a hard size cap instead of
@@ -53,16 +53,16 @@ primary key — one identifier for the job everywhere, rather than
 reconciling two different ids later. Then it creates the job row with
 status 'queued', enqueues the job id, and returns immediately."
 
-"Every route goes through `require_api_key` as a dependency — that's where
-auth and rate limiting live, so a new route can't accidentally be added
-without them. I used a simple per-key sliding-window limiter for this demo
-and explicitly noted in the README that it needs to move to something
-shared like Redis once there's more than one API instance, because
-right now it's per-process state."
+"Every route goes through `require_api_key` (`app/api/deps.py`) as a
+dependency — that's where auth and rate limiting live, so a new route can't
+accidentally be added without them. I used a simple per-key sliding-window
+limiter for this demo and explicitly noted in the README that it needs to
+move to something shared like Redis once there's more than one API
+instance, because right now it's per-process state."
 
-## 4. Walk through the worker — app/worker.py (2–2.5 min)
+## 4. Walk through the worker — app/services/worker.py (2–2.5 min)
 
-Open `app/worker.py`.
+Open `app/services/worker.py`.
 
 "This is where the actual pipeline runs. `TranscriptionPipeline.run` is the
 pure logic: normalize the audio, check its duration, and if it's under the
@@ -88,16 +88,16 @@ retry forever."
 *(Optional, if time allows: run `python -m unittest tests.test_worker -v`
 live and point at the retry-then-succeed and dead-letter tests passing.)*
 
-## 5. Long files and format handling — app/audio.py (1–1.5 min)
+## 5. Long files and format handling — app/services/audio.py (1–1.5 min)
 
-Open `app/audio.py`, scroll to `split_into_chunks`.
+Open `app/services/audio.py`, scroll to `split_into_chunks`.
 
 "For different formats — mp3, wav, m4a, flac, ogg, even the audio track of
 an mp4 — I normalize everything to 16kHz mono WAV with ffmpeg before it
 reaches the transcription engine, so nothing downstream has to think about
 input format again. For long files, I split into overlapping chunks — the
 overlap is what stops a word right at a chunk boundary from being cut in
-half. On the merge side [switch to `transcription_engine.py`,
+half. On the merge side [switch to `services/transcription_engine.py`,
 `merge_chunk_results`], I shift each chunk's local timestamps by its
 offset in the original file, and drop any segment from a later chunk that
 falls inside the region the previous chunk already covered, so the final

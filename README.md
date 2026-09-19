@@ -114,7 +114,7 @@ pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-`ffmpeg` is required regardless of engine — `app/audio.py` shells out to
+`ffmpeg` is required regardless of engine — `app/services/audio.py` shells out to
 `ffmpeg`/`ffprobe` on every upload (format normalization + chunking), not
 just in `whisper` mode. It's a runtime dependency, not just a Whisper one.
 Install it and restart your terminal so PATH picks it up:
@@ -199,13 +199,13 @@ explicitly:
   ("Engine running" bottom-left).
 
 - **`.env` silently ignored** — nothing in this app calls `python-dotenv`
-  or otherwise auto-loads `.env`; `app/config.py` only reads real
+  or otherwise auto-loads `.env`; `app/core/config.py` only reads real
   environment variables via `os.getenv(...)`. `.env` is just a file *you*
   are expected to turn into env vars (`Copy-Item .env.example .env` plus
   either `docker run --env-file .env ...`, or setting `$env:VAR` values
   yourself for the native venv path). Running `docker run` without
   `--env-file .env` means the container uses the defaults baked into
-  `app/config.py` (e.g. API key `dev-local-key`), regardless of what your
+  `app/core/config.py` (e.g. API key `dev-local-key`), regardless of what your
   `.env` says.
 
 ## Architecture
@@ -263,21 +263,39 @@ implementation swapped in later — see
 
 **Code layout:**
 
+The app is a layered package — HTTP surface, business logic, persistence,
+and cross-cutting infrastructure each get their own subpackage, so e.g.
+`app.services` has zero import-time dependency on FastAPI and can be
+unit-tested (and reused by a future CLI/admin tool) on its own:
+
 ```
 app/
-  main.py                 FastAPI routes, auth/rate-limit dependencies, wiring
-  worker.py                TranscriptionPipeline (pure logic) + Worker (queue/retry loop)
-  audio.py                 ffmpeg normalization, duration probing, chunking
-  transcription_engine.py  WhisperEngine / MockEngine + chunk-merge logic
-  store.py                 SQLite-backed job + transcript persistence
-  storage_backend.py       Object storage abstraction (local disk today)
-  queue_backend.py         Job queue abstraction (in-memory asyncio.Queue today)
-  rate_limit.py            Per-API-key sliding-window rate limiter
-  schemas.py                Pydantic request/response models
-  config.py                 All tunables, one place, env-var driven
-  logging_config.py         JSON structured logging
-tests/                     18 tests covering audio, merge logic, store, worker retry/dead-letter, rate limiting
+  main.py                        App factory: wires every singleton below, attaches
+                                  them to app.state in lifespan(), mounts the router.
+  api/                            HTTP layer.
+    routes.py                     Route handlers (upload/poll/list/healthz).
+    deps.py                       require_api_key: auth + rate-limit dependency.
+    schemas.py                    Pydantic request/response models.
+  services/                       Business logic - no FastAPI import anywhere in here.
+    worker.py                     TranscriptionPipeline (pure logic) + Worker (queue/retry loop)
+    audio.py                      ffmpeg normalization, duration probing, chunking
+    transcription_engine.py       WhisperEngine / MockEngine + chunk-merge logic
+    storage_backend.py            Object storage abstraction (local disk today)
+    queue_backend.py              Job queue abstraction (in-memory asyncio.Queue today)
+  db/
+    store.py                      SQLite-backed job + transcript persistence
+  core/                           Cross-cutting infrastructure.
+    config.py                     All tunables, one place, env-var driven
+    logging_config.py             JSON structured logging
+    rate_limit.py                 Per-API-key sliding-window rate limiter
+tests/                            18 tests covering audio, merge logic, store, worker retry/dead-letter, rate limiting
 ```
+
+The dependency direction is `api → services/db → core`: routes call into
+services and the store, services and the store read `core.config`, and
+nothing in `services`/`db`/`core` ever imports from `api` — which is what
+keeps the pipeline logic in `services/worker.py` testable directly (see
+`tests/test_worker.py`) without spinning up FastAPI at all.
 
 ## API
 
@@ -295,10 +313,10 @@ Full interactive docs (OpenAPI/Swagger) at `/docs` once the app is running.
 ## Inspecting local data (DB, audio, transcripts)
 
 Everything lands under `STORAGE_ROOT` (`storage/` locally, `/srv/storage`
-inside the Docker image — see [config.py](app/config.py)):
+inside the Docker image — see [core/config.py](app/core/config.py)):
 
 - `storage/jobs.db` — SQLite, one row per job (`jobs` table) plus a
-  `transcripts` table (see [store.py](app/store.py)'s `SCHEMA`).
+  `transcripts` table (see [db/store.py](app/db/store.py)'s `SCHEMA`).
 - `storage/audio/<job_id>/<original_filename>` — the uploaded audio.
 - `storage/transcripts/` — transcripts too large to store inline in the DB
   (over `INLINE_TRANSCRIPT_MAX_CHARS`, default ~20k chars).
@@ -342,15 +360,15 @@ mapped directly to what's actually implemented (not just described).
 extension against an allow-list (`.wav .mp3 .m4a .flac .ogg .mp4`), and
 streams the upload to disk with a hard size cap (`MAX_UPLOAD_BYTES`) rather
 than buffering the whole file in memory first — see `_save_with_size_limit`
-in `app/main.py`. Extension checking is a first line of defense only;
-`app/audio.py` normalizes with ffmpeg immediately afterward, which is where
+in `app/api/routes.py`. Extension checking is a first line of defense only;
+`app/services/audio.py` normalizes with ffmpeg immediately afterward, which is where
 a genuinely corrupt or mislabeled file actually gets rejected (ffmpeg errors
 out with a clear message instead of failing deep inside the transcription
 call).
 
 ### Transcribing speech to text, with per-segment timestamps
 
-`app/transcription_engine.py` wraps Whisper (`model.transcribe(path)`) and
+`app/services/transcription_engine.py` wraps Whisper (`model.transcribe(path)`) and
 maps its `segments` output to a small `Segment(id, start, end, text)`
 dataclass. Timestamps are seconds, rounded to 2 decimal places, matching
 the shape asked for in the assessment's own example code.
@@ -358,7 +376,7 @@ the shape asked for in the assessment's own example code.
 ### Handling different audio formats
 
 Every upload is normalized to 16kHz mono PCM WAV via ffmpeg
-(`app/audio.py::normalize_to_wav`) before it ever reaches the transcription
+(`app/services/audio.py::normalize_to_wav`) before it ever reaches the transcription
 engine — one normalization step, once, rather than teaching every
 downstream component about every possible input format. ffmpeg was chosen
 over a Python audio library specifically because it already handles the
@@ -370,10 +388,10 @@ pipelines use under the hood.
 
 Files longer than `CHUNK_THRESHOLD_SECONDS` (default 5 minutes) are split
 into overlapping chunks (`CHUNK_LENGTH_SECONDS` / `CHUNK_OVERLAP_SECONDS`,
-default 4 minutes / 5 seconds) by `app/audio.py::split_into_chunks`, each
+default 4 minutes / 5 seconds) by `app/services/audio.py::split_into_chunks`, each
 chunk is transcribed independently with bounded concurrency
 (`asyncio.Semaphore(MAX_CONCURRENT_CHUNK_TRANSCRIPTIONS)` in
-`app/worker.py::TranscriptionPipeline.run`), and the results are stitched
+`app/services/worker.py::TranscriptionPipeline.run`), and the results are stitched
 back together by `merge_chunk_results`. The overlap exists so a word spoken
 right at a chunk boundary is fully captured by at least one chunk instead of
 being cut in half; `merge_chunk_results` then drops any segment from a
@@ -396,16 +414,16 @@ entirely. That decoupling is *the* mechanism that makes concurrent uploads
 tractable: N simultaneous uploads become N fast API calls plus N queued
 jobs that workers drain at whatever rate they can sustain, instead of N
 requests each blocking a connection for however long transcription takes.
-In production, `storage_backend.presigned_upload_url` is the next step —
+In production, `services/storage_backend.presigned_upload_url` is the next step —
 letting the client upload bytes directly to S3 instead of proxying them
 through the API process at all.
 
 ### Storing audio and transcripts
 
-- **Audio**: saved to object storage (`storage_backend.py`; local disk here,
+- **Audio**: saved to object storage (`app/services/storage_backend.py`; local disk here,
   S3 in production) under a key derived from the job id, so retrieval never
   depends on which API instance handled the original upload.
-- **Metadata**: one row per job in the `jobs` table (`app/store.py`) —
+- **Metadata**: one row per job in the `jobs` table (`app/db/store.py`) —
   `id, user_id, original_filename, file_path, duration_seconds, status,
   retry_count, error_code, error_message, failed_at, language,
   trans_version, created_at, updated_at`. This is a direct match for the
@@ -430,7 +448,7 @@ through the API process at all.
 Every job has a `status` (`queued → processing → completed`, or
 `processing → retrying → processing` in a loop, or `→ failed`) and a
 `retry_count`. On any exception during processing (`Worker._handle_failure`
-in `app/worker.py`):
+in `app/services/worker.py`):
 
 1. If `retry_count <= MAX_RETRIES`, the job is marked `retrying` with the
    error code/message recorded, and re-enqueued after an exponential
@@ -449,9 +467,9 @@ fails ends up `failed` with exactly one dead-letter file written.
 ### Exposing this as an API
 
 - **Auth**: every route (except `/healthz`) requires `X-API-Key`
-  (`app/main.py::require_api_key`), checked against a configured key set.
+  (`app/api/deps.py::require_api_key`), checked against a configured key set.
 - **Rate limiting**: a per-key sliding-window limiter
-  (`app/rate_limit.py`), enforced in the same dependency as auth so no new
+  (`app/core/rate_limit.py`), enforced in the same dependency as auth so no new
   route can accidentally skip it.
 - **Validation & error handling**: Pydantic models for every
   request/response; a global exception handler maps domain errors
@@ -464,7 +482,7 @@ fails ends up `failed` with exactly one dead-letter file written.
 - **Docs**: FastAPI's built-in OpenAPI/Swagger UI at `/docs` — every
   request/response model above is what generates that documentation, not a
   hand-maintained spec that can drift from the code.
-- **Logging**: structured JSON logs (`app/logging_config.py`), so
+- **Logging**: structured JSON logs (`app/core/logging_config.py`), so
   `job_id`/`status`/`error_code` are queryable fields in a log aggregator,
   not substrings to grep for.
 - **Async & scalable by construction**: heavy work never happens inline in
@@ -479,11 +497,11 @@ decision worth evaluating:
 
 | Concern | This repo | Production | Swap cost |
 |---|---|---|---|
-| Object storage | `LocalDiskStorage` (disk) | S3 / GCS / Azure Blob | New class implementing the same 3-method interface (`app/storage_backend.py`) |
-| Job queue | `InMemoryQueue` (`asyncio.Queue`) | SQS / RabbitMQ / Kafka | New class implementing `enqueue`/`dequeue` (`app/queue_backend.py`) |
-| Metadata DB | SQLite | PostgreSQL | Same schema (see `store.py`'s `SCHEMA`); swap the connection for `psycopg2`/SQLAlchemy |
+| Object storage | `LocalDiskStorage` (disk) | S3 / GCS / Azure Blob | New class implementing the same 3-method interface (`app/services/storage_backend.py`) |
+| Job queue | `InMemoryQueue` (`asyncio.Queue`) | SQS / RabbitMQ / Kafka | New class implementing `enqueue`/`dequeue` (`app/services/queue_backend.py`) |
+| Metadata DB | SQLite | PostgreSQL | Same schema (see `app/db/store.py`'s `SCHEMA`); swap the connection for `psycopg2`/SQLAlchemy |
 | Rate limiter | In-process sliding window | Redis-backed shared counter | Needed as soon as there's more than one API instance — see limitation below |
-| Transcription engine | `TRANSCRIPTION_ENGINE=mock` for tests/CI, `whisper` for real use | Same `whisper` engine, possibly a larger model size or a hosted ASR API | One env var; no code change (`app/transcription_engine.py::get_engine`) |
+| Transcription engine | `TRANSCRIPTION_ENGINE=mock` for tests/CI, `whisper` for real use | Same `whisper` engine, possibly a larger model size or a hosted ASR API | One env var; no code change (`app/services/transcription_engine.py::get_engine`) |
 
 ## Scaling this to production
 
@@ -530,7 +548,7 @@ so they run fast in CI and don't need a multi-GB model download to prove the
 - `test_worker.py` — retry-then-succeed, permanent-failure-to-dead-letter, and the long-audio chunked path, end to end through the real `Worker`
 - `test_rate_limit.py` — per-key sliding window behavior
 
-The FastAPI HTTP layer (`app/main.py`) itself is not covered by an automated
+The FastAPI HTTP layer (`app/main.py` / `app/api/`) itself is not covered by an automated
 test in this submission — it was hand-verified for correctness (route
 signatures, dependency wiring, status codes) but couldn't be exercised with
 `TestClient` in the environment this was built in. Given more time, I'd add
