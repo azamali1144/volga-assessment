@@ -28,11 +28,11 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from app.audio import AudioProcessingError, normalize_to_wav, probe_duration_seconds, split_into_chunks
-from app.queue_backend import InMemoryQueue, JobMessage
-from app.storage_backend import LocalDiskStorage
-from app.store import JobStore
-from app.transcription_engine import TranscriptionEngine, merge_chunk_results
+from app.db.store import JobStore
+from app.services.audio import AudioProcessingError, normalize_to_wav, probe_duration_seconds, split_into_chunks
+from app.services.queue_backend import InMemoryQueue, JobMessage
+from app.services.storage_backend import LocalDiskStorage
+from app.services.transcription_engine import TranscriptionEngine, merge_chunk_results
 
 logger = logging.getLogger("volga.worker")
 

@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from app.audio import AudioChunk
+from app.services.audio import AudioChunk
 
 
 @dataclass
@@ -89,7 +89,7 @@ class MockEngine:
     """
 
     def transcribe(self, wav_path: Path) -> TranscriptionResult:
-        from app.audio import probe_duration_seconds
+        from app.services.audio import probe_duration_seconds
 
         duration = probe_duration_seconds(wav_path)
         digest = hashlib.sha1(wav_path.read_bytes()).hexdigest()[:8]
