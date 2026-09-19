@@ -9,6 +9,12 @@ RUN apt-get update \
 WORKDIR /srv
 
 COPY requirements.txt .
+# openai-whisper's setup.py imports pkg_resources at build time; recent
+# setuptools releases dropped it by default, which breaks pip's isolated
+# build env for this (old, pinned) whisper release. PIP_CONSTRAINT (not
+# --constraint) is what actually reaches that isolated build subprocess.
+RUN echo "setuptools<81" > /tmp/build-constraints.txt
+ENV PIP_CONSTRAINT=/tmp/build-constraints.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app

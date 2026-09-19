@@ -10,8 +10,12 @@ this way, not on Whisper itself.
 ## Contents
 
 - [Quick start](#quick-start)
+  - [macOS / Linux](#macos--linux)
+  - [Windows 11 (PowerShell)](#windows-11-powershell)
+  - [Windows + Docker Desktop troubleshooting](#windows--docker-desktop-troubleshooting)
 - [Architecture](#architecture)
 - [API](#api)
+- [Inspecting local data (DB, audio, transcripts)](#inspecting-local-data-db-audio-transcripts)
 - [Design decisions](#design-decisions) — one subsection per assessment question
 - [What's real vs. mocked, and why](#whats-real-vs-mocked-and-why)
 - [Scaling this to production](#scaling-this-to-production)
@@ -19,6 +23,13 @@ this way, not on Whisper itself.
 - [Known limitations / what I'd do with more time](#known-limitations--what-id-do-with-more-time)
 
 ## Quick start
+
+Two ways to run it: Docker (simplest — ffmpeg and everything else is baked
+into the image), or a native virtualenv (needed if you want `--reload`
+iteration on the code). Pick whichever suits you; commands are given for
+both macOS/Linux and Windows 11.
+
+### macOS / Linux
 
 ```bash
 python -m venv .venv && source .venv/bin/activate
@@ -59,6 +70,143 @@ docker run -p 8000:8000 volga-assessment
 python -m unittest discover -s tests -p "test_*.py" -v
 # or: pytest -v
 ```
+
+### Windows 11 (PowerShell)
+
+The commands above are bash; here's the PowerShell equivalent, plus the
+Windows-specific gotchas that don't show up on macOS/Linux.
+
+**Option A — Docker (recommended: sidesteps the ffmpeg-on-PATH and
+Whisper/torch install-time issues below).**
+
+```powershell
+docker build -t volga-assessment .
+
+# mock engine (default baked into the image, no model download):
+docker run -p 8000:8000 -v ${PWD}\storage:/srv/storage volga-assessment
+
+# real Whisper engine, with your own .env for API keys etc.:
+docker run -p 8000:8000 --env-file .env -e TRANSCRIPTION_ENGINE=whisper -v ${PWD}\storage:/srv/storage volga-assessment
+```
+
+The `-v ${PWD}\storage:/srv/storage` mount matters: without it, everything
+under `/srv/storage` (the SQLite DB, uploaded audio, transcripts) lives only
+in that specific container's writable layer and is gone the moment the
+container is removed — and every `docker run` without `--rm` creates a
+*new* container, so repeated runs quietly pile up disconnected containers
+each with their own empty storage. Mounting a host folder makes the data
+persist across restarts and lets you open `storage\jobs.db` directly from
+Windows. See [Windows + Docker Desktop troubleshooting](#windows--docker-desktop-troubleshooting)
+if `docker build`/`docker run` fail outright, and
+[Inspecting local data](#inspecting-local-data-db-audio-transcripts) for how
+to query the DB and browse stored files.
+
+Open `http://localhost:8000/docs` for Swagger UI — note it's `localhost`,
+not the `0.0.0.0` shown in the container's own startup log (`0.0.0.0` is
+where the server *listens*, not an address a browser can navigate to).
+
+**Option B — native venv.**
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+```
+
+`ffmpeg` is required regardless of engine — `app/audio.py` shells out to
+`ffmpeg`/`ffprobe` on every upload (format normalization + chunking), not
+just in `whisper` mode. It's a runtime dependency, not just a Whisper one.
+Install it and restart your terminal so PATH picks it up:
+
+```powershell
+winget install Gyan.FFmpeg
+# or: choco install ffmpeg
+```
+
+Run with the mock engine (no model download):
+
+```powershell
+$env:TRANSCRIPTION_ENGINE = "mock"
+uvicorn app.main:app --reload
+```
+
+Or with real Whisper:
+
+```powershell
+$env:TRANSCRIPTION_ENGINE = "whisper"
+uvicorn app.main:app --reload
+```
+
+If `pip install -r requirements.txt` fails while building `openai-whisper`
+with `ModuleNotFoundError: No module named 'pkg_resources'`, that's a known
+incompatibility between this pinned Whisper release's old `setup.py` and
+recent `setuptools` releases that dropped `pkg_resources` by default — not
+a problem with this repo's own code. Fix it by constraining `setuptools`
+for the build:
+
+```powershell
+pip install "setuptools<81"
+pip install -r requirements.txt
+```
+
+(The Dockerfile applies the equivalent fix automatically via
+`PIP_CONSTRAINT`, so Option A doesn't need this.)
+
+**Trying the API** (PowerShell equivalent of the curl example above; note
+the default API key is only `dev-local-key` if you didn't pass `.env` to
+the container — see the callout above):
+
+```powershell
+$resp = Invoke-RestMethod -Uri "http://localhost:8000/api/v1/transcriptions" `
+  -Method Post -Headers @{ "X-API-Key" = "dev-local-key" } `
+  -Form @{ file = Get-Item "sample.mp3" }
+$resp
+
+Invoke-RestMethod -Uri "http://localhost:8000/api/v1/transcriptions/$($resp.job_id)" `
+  -Headers @{ "X-API-Key" = "dev-local-key" }
+```
+
+**Tests:**
+
+```powershell
+python -m unittest discover -s tests -p "test_*.py" -v
+# or: pytest -v
+```
+
+`test_audio.py` and parts of `test_worker.py` shell out to real `ffmpeg`,
+so install it first (see above) for a fully green run.
+
+### Windows + Docker Desktop troubleshooting
+
+Two Docker Desktop issues are common enough on Windows to call out
+explicitly:
+
+- **`permission denied while trying to connect to the docker API at
+  npipe:////./pipe/docker_engine`** — your Windows account isn't a member
+  of the `docker-users` local group, so it can't reach the named pipe even
+  though Docker Desktop itself is running. Fix it from an **elevated**
+  PowerShell:
+
+  ```powershell
+  net localgroup docker-users "<your-username>" /add
+  ```
+
+  Then **sign out and back in to Windows** (not just restart the
+  terminal — group membership changes need a fresh login token). Check
+  membership with `net localgroup docker-users`, and check the engine
+  itself is actually up with `docker info` or the Docker Desktop UI
+  ("Engine running" bottom-left).
+
+- **`.env` silently ignored** — nothing in this app calls `python-dotenv`
+  or otherwise auto-loads `.env`; `app/config.py` only reads real
+  environment variables via `os.getenv(...)`. `.env` is just a file *you*
+  are expected to turn into env vars (`Copy-Item .env.example .env` plus
+  either `docker run --env-file .env ...`, or setting `$env:VAR` values
+  yourself for the native venv path). Running `docker run` without
+  `--env-file .env` means the container uses the defaults baked into
+  `app/config.py` (e.g. API key `dev-local-key`), regardless of what your
+  `.env` says.
 
 ## Architecture
 
@@ -143,6 +291,45 @@ All routes are under `/api/v1` and require an `X-API-Key` header.
 | `GET` | `/healthz` | Unauthenticated liveness probe for a load balancer. |
 
 Full interactive docs (OpenAPI/Swagger) at `/docs` once the app is running.
+
+## Inspecting local data (DB, audio, transcripts)
+
+Everything lands under `STORAGE_ROOT` (`storage/` locally, `/srv/storage`
+inside the Docker image — see [config.py](app/config.py)):
+
+- `storage/jobs.db` — SQLite, one row per job (`jobs` table) plus a
+  `transcripts` table (see [store.py](app/store.py)'s `SCHEMA`).
+- `storage/audio/<job_id>/<original_filename>` — the uploaded audio.
+- `storage/transcripts/` — transcripts too large to store inline in the DB
+  (over `INLINE_TRANSCRIPT_MAX_CHARS`, default ~20k chars).
+- `storage/dead_letter/` — one record per job that exhausted its retries.
+
+**Running natively:** these are plain folders/files next to the repo —
+open `storage/jobs.db` in any SQLite browser (e.g.
+[DB Browser for SQLite](https://sqlitebrowser.org/)), or query it inline:
+
+```bash
+python3 -c "import sqlite3; c=sqlite3.connect('storage/jobs.db'); c.row_factory=sqlite3.Row; [print(dict(r)) for r in c.execute('SELECT * FROM jobs')]"
+```
+
+**Running in Docker:** if you started the container with a volume mount
+(`-v ${PWD}\storage:/srv/storage` on Windows, `-v $(pwd)/storage:/srv/storage`
+on macOS/Linux — see [Quick start](#quick-start)), the same files show up
+directly in your local `storage/` folder, no different from the native
+case. If you *didn't* mount a volume, the data only exists inside that
+container's writable layer; reach it via `docker exec`/`docker cp`:
+
+```powershell
+docker ps                                  # find the container id/name
+
+docker exec -it <container> python3 -c "import sqlite3; c=sqlite3.connect('/srv/storage/jobs.db'); c.row_factory=sqlite3.Row; [print(dict(r)) for r in c.execute('SELECT * FROM jobs')]"
+
+docker cp <container>:/srv/storage/jobs.db .\jobs.db     # pull the DB out to inspect with a GUI tool
+docker cp <container>:/srv/storage ./storage-from-container   # or pull everything
+```
+
+(The slim Docker base image doesn't ship the `sqlite3` CLI binary, which is
+why the examples above use Python's built-in `sqlite3` module instead.)
 
 ## Design decisions
 
